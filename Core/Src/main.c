@@ -103,11 +103,6 @@ GPIO_TypeDef* ledPorts[4] = {
     GPIOD, GPIOC, GPIOC, GPIOC
 };
 
-// PD2 - CN10 pin 4
-//PC7 - CN7 pin 37
-//PC6 - CN7 pin 35
-// PC10 - CN7 pin 1
-
 uint16_t ledPins[4] = {
     GPIO_PIN_2,
     GPIO_PIN_7,
@@ -115,16 +110,9 @@ uint16_t ledPins[4] = {
     GPIO_PIN_10
 };
 
-
-
 GPIO_TypeDef* buttonPorts[4] = {
     GPIOC, GPIOC, GPIOC, GPIOC
 };
-
-// PC2 - CN7 pin 31
-//PC3 - CN7 pin 29
-//PC4 - CN7 pin 33
-// PC5 - CN7 pin 11
 
 uint16_t buttonPins[4] = {
     GPIO_PIN_2,
@@ -294,7 +282,7 @@ void Show_Countdown(void)
     {
         uint32_t buttons = TFTShield18_readButtons();
 
-        if ((TFTSHIELD_BUTTON_IN))
+        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
         {
             gameState = GAME_STATE_WELCOME;
             return;
@@ -318,7 +306,8 @@ void Play_Game_Sequence(void)
 {
     for (int i = 0; i < level; i++)
     {
-        if (!(TFTShield18_readButtons() & TFTSHIELD_BUTTON_IN))
+        uint8_t buttons = TFTShield18_readButtons();
+        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
         {
             gameState = GAME_STATE_WELCOME;
             return;
@@ -453,7 +442,7 @@ void Show_Game_Over(void)
     {
         uint32_t buttons = TFTShield18_readButtons();
 
-        if (!(buttons & TFTSHIELD_BUTTON_IN))
+        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
             break;
 
         uint32_t randomValue;
@@ -547,11 +536,9 @@ int main(void)
 
   TFTShield18_setBacklight(TFTSHIELD_BACKLIGHT_ON);
 
-  Simon_GPIO_Init();
-
-  buzzerDisable(&buzzer1);
-
   Show_Welcome();
+
+  Simon_GPIO_Init();
 
   while (1)
   {
@@ -561,7 +548,7 @@ int main(void)
           {
               uint32_t buttons = TFTShield18_readButtons();
 
-              if (!(buttons & TFTSHIELD_BUTTON_IN))
+              if ((buttons & TFTSHIELD_BUTTON_IN) != 0)
               {
                   level = 1;
                   inputIndex = 0;
