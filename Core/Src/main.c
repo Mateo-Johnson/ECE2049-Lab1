@@ -103,6 +103,11 @@ GPIO_TypeDef* ledPorts[4] = {
     GPIOD, GPIOC, GPIOC, GPIOC
 };
 
+// PD2 - CN10 pin 4
+//PC7 - CN7 pin 37
+//PC6 - CN7 pin 35
+// PC10 - CN7 pin 1
+
 uint16_t ledPins[4] = {
     GPIO_PIN_2,
     GPIO_PIN_7,
@@ -110,9 +115,16 @@ uint16_t ledPins[4] = {
     GPIO_PIN_10
 };
 
+
+
 GPIO_TypeDef* buttonPorts[4] = {
     GPIOC, GPIOC, GPIOC, GPIOC
 };
+
+// PC2 - CN7 pin 31
+//PC3 - CN7 pin 29
+//PC4 - CN7 pin 33
+// PC5 - CN7 pin 11
 
 uint16_t buttonPins[4] = {
     GPIO_PIN_2,
@@ -282,7 +294,7 @@ void Show_Countdown(void)
     {
         uint32_t buttons = TFTShield18_readButtons();
 
-        if (!(buttons & TFTSHIELD_BUTTON_IN))
+        if ((TFTSHIELD_BUTTON_IN))
         {
             gameState = GAME_STATE_WELCOME;
             return;
