@@ -571,7 +571,7 @@ int main(void)
             
               int8_t button = Read_Button();
 
-              if (button >= 0)
+              if (button != -1)
               {
                   currentButton = button;
                   LED_On(currentButton);
@@ -583,6 +583,8 @@ int main(void)
 
                   gameState = GAME_STATE_CHECK_INPUT;
               }
+              DWT_delayMs(2000);
+              gameState = GAME_STATE_GAME_OVER;
 
               break;
           }
