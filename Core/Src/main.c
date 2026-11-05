@@ -100,13 +100,13 @@ uint8_t currentButton = 0;
 uint32_t randomNumber;
 
 GPIO_TypeDef* ledPorts[4] = {
-    GPIOC, GPIOC, GPIOD, GPIOC
+    GPIOD, GPIOC, GPIOC, GPIOC
 };
 
 uint16_t ledPins[4] = {
-    GPIO_PIN_0,
-    GPIO_PIN_1,
     GPIO_PIN_2,
+    GPIO_PIN_7,
+    GPIO_PIN_6,
     GPIO_PIN_10
 };
 
