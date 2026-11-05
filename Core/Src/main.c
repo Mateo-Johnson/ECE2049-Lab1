@@ -193,19 +193,24 @@ void Simon_GPIO_Init(void)
 
 void LEDs_AllOff(void)
 {
-    for (int i = 0; i < 4; i++)
-    {
-        HAL_GPIO_WritePin(ledPorts[i], ledPins[i], GPIO_PIN_RESET);
-    }
+    // Clear PD2 (LED 0)
+    GPIOD->ODR &= ~GPIO_PIN_2;
+    
+    // Clear PC6, PC7, PC10 (LEDs 1, 2, 3)
+    GPIOC->ODR &= ~(GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_10);
 }
 
 void LED_On(uint8_t led)
 {
     LEDs_AllOff();
 
-    if (led < 4)
+    switch(led)
     {
-        HAL_GPIO_WritePin(ledPorts[led], ledPins[led], GPIO_PIN_SET);
+        case 0: GPIOD->ODR |= GPIO_PIN_2;  break; // Turn on PD2
+        case 1: GPIOC->ODR |= GPIO_PIN_7;  break; // Turn on PC7
+        case 2: GPIOC->ODR |= GPIO_PIN_6;  break; // Turn on PC6
+        case 3: GPIOC->ODR |= GPIO_PIN_10; break; // Turn on PC10
+        default: break;
     }
 }
 
@@ -563,6 +568,7 @@ int main(void)
 
           case GAME_STATE_WAIT_INPUT:
           {
+            
               int8_t button = Read_Button();
 
               if (button >= 0)
