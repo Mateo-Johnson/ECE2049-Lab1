@@ -104,10 +104,10 @@ GPIO_TypeDef* ledPorts[4] = {
 };
 
 uint16_t ledPins[4] = {
-    GPIO_PIN_2,
-    GPIO_PIN_7,
-    GPIO_PIN_6,
-    GPIO_PIN_10
+    GPIO_PIN_2, //PD2 - CN7 4 - yellow LED
+    GPIO_PIN_7, //PC7 - CN10 19 - red LED
+    GPIO_PIN_6, //PC6 - CN10 4 - blue LED
+    GPIO_PIN_10 //PC10 - CN7 1 - green LED
 };
 
 GPIO_TypeDef* buttonPorts[4] = {
@@ -115,10 +115,10 @@ GPIO_TypeDef* buttonPorts[4] = {
 };
 
 uint16_t buttonPins[4] = {
-    GPIO_PIN_2,
-    GPIO_PIN_3,
-    GPIO_PIN_4,
-    GPIO_PIN_5
+    GPIO_PIN_2, //PC2 - CN7 35 - yellow BUTTON
+    GPIO_PIN_3, //PC3 - CN7 37 -  red BUTTON
+    GPIO_PIN_4, //PC4 - CN10 34 - blue BUTTON
+    GPIO_PIN_5 //PC5 - CN10 6 - greeen BUTTON
 };
 
 uint8_t noteNumbers[4] = {0, 4, 7, 11};
