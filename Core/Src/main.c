@@ -172,34 +172,21 @@ void Wait_Button_Release(void)
 
 void Simon_GPIO_Init(void)
 {
-    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
-    RCC->AHB2ENR |= RCC_AHB2ENR_GPIODEN;
+    RCC->AHB2ENR |= (RCC_AHB2ENR_GPIOCEN | RCC_AHB2ENR_GPIODEN);
 
-    GPIOC->MODER &= ~(GPIO_MODER_MODE0 |
-                      GPIO_MODER_MODE1 |
-                      GPIO_MODER_MODE10);
+    // LED 0 (PD2)
+    GPIOD->MODER &= ~GPIO_MODER_MODE2;   // Clear bits
+    GPIOD->MODER |= GPIO_MODER_MODE2_0;  // Set to Output (01)
 
-    GPIOC->MODER |= GPIO_MODER_MODE0_0 |
-                    GPIO_MODER_MODE1_0 |
-                    GPIO_MODER_MODE10_0;
+    GPIOC->MODER &= ~(GPIO_MODER_MODE6 | GPIO_MODER_MODE7 | GPIO_MODER_MODE10);
+    GPIOC->MODER |= (GPIO_MODER_MODE6_0 | GPIO_MODER_MODE7_0 | GPIO_MODER_MODE10_0);
 
-    GPIOD->MODER &= ~GPIO_MODER_MODE2;
-    GPIOD->MODER |= GPIO_MODER_MODE2_0;
+    // Buttons (PC2, PC3, PC4, PC5)
+    GPIOC->MODER &= ~(GPIO_MODER_MODE2 | GPIO_MODER_MODE3 | GPIO_MODER_MODE4 | GPIO_MODER_MODE5);
 
-    GPIOC->MODER &= ~(GPIO_MODER_MODE2 |
-                      GPIO_MODER_MODE3 |
-                      GPIO_MODER_MODE4 |
-                      GPIO_MODER_MODE5);
+    GPIOC->PUPDR &= ~(GPIO_PUPDR_PUPD2 | GPIO_PUPDR_PUPD3 | GPIO_PUPDR_PUPD4 | GPIO_PUPDR_PUPD5);
 
-    GPIOC->PUPDR &= ~(GPIO_PUPDR_PUPD2 |
-                      GPIO_PUPDR_PUPD3 |
-                      GPIO_PUPDR_PUPD4 |
-                      GPIO_PUPDR_PUPD5);
-
-    GPIOC->PUPDR |= GPIO_PUPDR_PUPD2_1 |
-                    GPIO_PUPDR_PUPD3_1 |
-                    GPIO_PUPDR_PUPD4_1 |
-                    GPIO_PUPDR_PUPD5_1;
+    GPIOC->PUPDR |= (GPIO_PUPDR_PUPD2_1 | GPIO_PUPDR_PUPD3_1 | GPIO_PUPDR_PUPD4_1 | GPIO_PUPDR_PUPD5_1);
 
     LEDs_AllOff();
 }
@@ -306,8 +293,8 @@ void Play_Game_Sequence(void)
 {
     for (int i = 0; i < level; i++)
     {
-        uint8_t buttons = TFTShield18_readButtons();
-        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
+        uint32_t buttons = TFTShield18_readButtons();
+        if ((buttons & TFTSHIELD_BUTTON_IN) == 0)
         {
             gameState = GAME_STATE_WELCOME;
             return;
@@ -548,7 +535,7 @@ int main(void)
           {
               uint32_t buttons = TFTShield18_readButtons();
 
-              if ((buttons & TFTSHIELD_BUTTON_IN) != 0)
+              if ((buttons & TFTSHIELD_BUTTON_IN) == 0)
               {
                   level = 1;
                   inputIndex = 0;
@@ -607,7 +594,7 @@ int main(void)
 
                   if (inputIndex >= level)
                   {
-                      gameState = SUCCESS;
+                      gameState = GAME_STATE_SUCCESS;
                   }
                   else
                   {
