@@ -99,26 +99,26 @@ uint8_t currentButton = 0;
 
 uint32_t randomNumber;
 
-GPIO_TypeDef* ledPorts[4] = {
-    GPIOD, GPIOC, GPIOC, GPIOC
+#define BUTTON_ACTIVE_STATE  GPIO_PIN_RESET
+
+static const uint16_t simonColors[4] = {
+    ST7735_YELLOW, ST7735_RED, ST7735_BLUE, ST7735_GREEN   /* matches LED/button index order */
 };
 
+GPIO_TypeDef* ledPorts[4] = { GPIOD, GPIOC, GPIOC, GPIOC };
 uint16_t ledPins[4] = {
-    GPIO_PIN_2, //PD2 - CN7 4 - yellow LED
-    GPIO_PIN_7, //PC7 - CN10 19 - red LED
-    GPIO_PIN_6, //PC6 - CN10 4 - blue LED
-    GPIO_PIN_10 //PC10 - CN7 1 - green LED
+    GPIO_PIN_2,   // PD2  - yellow LED
+    GPIO_PIN_7,   // PC7  - red LED
+    GPIO_PIN_6,   // PC6  - blue LED
+    GPIO_PIN_10   // PC10 - green LED
 };
 
-GPIO_TypeDef* buttonPorts[4] = {
-    GPIOC, GPIOC, GPIOC, GPIOC
-};
-
+GPIO_TypeDef* buttonPorts[4] = { GPIOC, GPIOC, GPIOC, GPIOC };
 uint16_t buttonPins[4] = {
-    GPIO_PIN_2, //PC2 - CN7 35 - yellow BUTTON
-    GPIO_PIN_3, //PC3 - CN7 37 -  red BUTTON
-    GPIO_PIN_4, //PC4 - CN10 34 - blue BUTTON
-    GPIO_PIN_5 //PC5 - CN10 6 - greeen BUTTON
+    GPIO_PIN_8,   // PC8 - yellow button
+    GPIO_PIN_9,   // PC9 - red button
+    GPIO_PIN_4,   // PC4 - blue button
+    GPIO_PIN_5    // PC5 - green button
 };
 
 uint8_t noteNumbers[4] = {0, 4, 7, 11};
@@ -172,58 +172,54 @@ void Wait_Button_Release(void)
 
 void Simon_GPIO_Init(void)
 {
-    RCC->AHB2ENR |= (RCC_AHB2ENR_GPIOCEN | RCC_AHB2ENR_GPIODEN);
+    GPIO_InitTypeDef g = {0};
 
-    // LED 0 (PD2)
-    GPIOD->MODER &= ~GPIO_MODER_MODE2;   // Clear bits
-    GPIOD->MODER |= GPIO_MODER_MODE2_0;  // Set to Output (01)
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
 
-    GPIOC->MODER &= ~(GPIO_MODER_MODE6 | GPIO_MODER_MODE7 | GPIO_MODER_MODE10);
-    GPIOC->MODER |= (GPIO_MODER_MODE6_0 | GPIO_MODER_MODE7_0 | GPIO_MODER_MODE10_0);
+    /*push-pull outputs, start off */
+    for (int i = 0; i < 4; i++)
+        HAL_GPIO_WritePin(ledPorts[i], ledPins[i], GPIO_PIN_RESET);
 
-    // Buttons (PC2, PC3, PC4, PC5)
-    GPIOC->MODER &= ~(GPIO_MODER_MODE2 | GPIO_MODER_MODE3 | GPIO_MODER_MODE4 | GPIO_MODER_MODE5);
+    g.Mode  = GPIO_MODE_OUTPUT_PP;
+    g.Pull  = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    for (int i = 0; i < 4; i++)
+    {
+        g.Pin = ledPins[i];
+        HAL_GPIO_Init(ledPorts[i], &g);
+    }
 
-    GPIOC->PUPDR &= ~(GPIO_PUPDR_PUPD2 | GPIO_PUPDR_PUPD3 | GPIO_PUPDR_PUPD4 | GPIO_PUPDR_PUPD5);
-
-    GPIOC->PUPDR |= (GPIO_PUPDR_PUPD2_0 | GPIO_PUPDR_PUPD3_0 | GPIO_PUPDR_PUPD4_0 | GPIO_PUPDR_PUPD5_0);
-
-    LEDs_AllOff();
+    /*inputs with pull-ups IMPORTANT TO NOTE THAT THEY ARE PULL UPS*/
+    g.Mode = GPIO_MODE_INPUT;
+    g.Pull = GPIO_PULLUP;
+    for (int i = 0; i < 4; i++)
+    {
+        g.Pin = buttonPins[i];
+        HAL_GPIO_Init(buttonPorts[i], &g);
+    }
 }
 
 void LEDs_AllOff(void)
 {
-    // Clear PD2 (LED 0)
-    GPIOD->ODR &= ~GPIO_PIN_2;
-    
-    // Clear PC6, PC7, PC10 (LEDs 1, 2, 3)
-    GPIOC->ODR &= ~(GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_10);
+    for (int i = 0; i < 4; i++)
+        HAL_GPIO_WritePin(ledPorts[i], ledPins[i], GPIO_PIN_RESET);
 }
 
 void LED_On(uint8_t led)
 {
     LEDs_AllOff();
-
-    switch(led)
-    {
-        case 0: GPIOD->ODR |= GPIO_PIN_2;  break; // Turn on PD2
-        case 1: GPIOC->ODR |= GPIO_PIN_7;  break; // Turn on PC7
-        case 2: GPIOC->ODR |= GPIO_PIN_6;  break; // Turn on PC6
-        case 3: GPIOC->ODR |= GPIO_PIN_10; break; // Turn on PC10
-        default: break;
-    }
+    if (led < 4)
+        HAL_GPIO_WritePin(ledPorts[led], ledPins[led], GPIO_PIN_SET);
 }
 
 int8_t Read_Button(void)
 {
     for (int i = 0; i < 4; i++)
     {
-        if (HAL_GPIO_ReadPin(buttonPorts[i], buttonPins[i]) == GPIO_PIN_SET)
-        {
+        if (HAL_GPIO_ReadPin(buttonPorts[i], buttonPins[i]) == BUTTON_ACTIVE_STATE)
             return i;
-        }
     }
-
     return -1;
 }
 
@@ -330,28 +326,19 @@ void Add_History(uint8_t button)
 
 void Draw_Game_Buttons(void)
 {
-    uint16_t colors[4] = {
-        ST7735_RED,
-        ST7735_BLUE,
-        ST7735_GREEN,
-        ST7735_YELLOW
-    };
 
     int xPositions[4] = {15, 85, 15, 85};
     int yPositions[4] = {30, 30, 95, 95};
 
     for (int i = 0; i < 4; i++)
     {
-        uint8_t pressed = HAL_GPIO_ReadPin(
-            buttonPorts[i],
-            buttonPins[i]
-        ) == GPIO_PIN_SET;
+        uint8_t pressed = HAL_GPIO_ReadPin(buttonPorts[i], buttonPins[i]) == BUTTON_ACTIVE_STATE;
 
         Display_fillCircle(
             xPositions[i],
             yPositions[i],
             22,
-            pressed ? colors[i] : ST7735_WHITE
+            pressed ? simonColors[i] : ST7735_WHITE
         );
     }
 }
@@ -396,7 +383,7 @@ void Update_Game_Display(void)
             15 + (i * 25),
             150,
             7,
-            colors[playerHistory[index]]
+            simonColors[playerHistory[index]]
         );
     }
 }
@@ -509,6 +496,7 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   DWT_Init();
+  Simon_GPIO_Init();
 
   TFTShield18_create(&hi2c1);
 
@@ -529,8 +517,6 @@ int main(void)
   TFTShield18_setBacklight(TFTSHIELD_BACKLIGHT_ON);
 
   Show_Welcome();
-
-  Simon_GPIO_Init();
 
   while (1)
   {
@@ -568,25 +554,30 @@ int main(void)
 
           case GAME_STATE_WAIT_INPUT:
           {
+            int8_t button = -1;
+            uint32_t startTime = HAL_GetTick(); // Capture current uptime millisecond ticker
             
-              int8_t button = Read_Button();
+            // Poll loop waiting for a button or a 2000ms timeout
+            while ((HAL_GetTick() - startTime < 2000) && (button == -1))
+            {
+                button = Read_Button();
+            }
 
-              if (button != -1)
-              {
-                  currentButton = button;
-                  LED_On(currentButton);
-                  Play_Note(currentButton);
-
-                  Add_History(currentButton);
-
-                  Update_Game_Display();
-
-                  gameState = GAME_STATE_CHECK_INPUT;
-              }
-              DWT_delayMs(2000);
-              gameState = GAME_STATE_GAME_OVER;
-
-              break;
+            if (button != -1)
+            {
+                currentButton = button;
+                LED_On(currentButton);
+                Play_Note(currentButton);
+                Add_History(currentButton);
+                Update_Game_Display();
+                gameState = GAME_STATE_CHECK_INPUT;
+            }
+            else
+            {
+                // 2 seconds passed with no input
+                gameState = GAME_STATE_GAME_OVER;
+            }
+            break;
           }
 
           case GAME_STATE_CHECK_INPUT:
