@@ -65,17 +65,20 @@ DMA_HandleTypeDef handle_GPDMA1_Channel7;
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
-
 Buzzer buzzer1 = {
   &htim1,
   TIM_CHANNEL_1,
   false
 };
-
+ 
 extern Note const chromaticScale[NUM_NOTES];
-
-#define MAX_SEQUENCE 32
-
+ 
+#define MAX_SEQUENCE      33
+#define WIN_LEVEL         32
+#define INPUT_TIMEOUT_MS  5000
+ 
+#define SELECT_PRESSED()  ((TFTShield18_readButtons() & TFTSHIELD_BUTTON_IN) == 0)
+ 
 typedef enum
 {
     GAME_STATE_WELCOME = 0,
@@ -84,47 +87,39 @@ typedef enum
     GAME_STATE_WAIT_INPUT,
     GAME_STATE_CHECK_INPUT,
     GAME_STATE_SUCCESS,
+    GAME_STATE_WIN,
     GAME_STATE_GAME_OVER
 } GameState;
-
+ 
 GameState gameState = GAME_STATE_WELCOME;
-
+ 
 uint8_t sequence[MAX_SEQUENCE];
 uint8_t playerHistory[MAX_SEQUENCE];
-
+ 
 uint8_t level = 1;
 uint8_t inputIndex = 0;
 uint8_t historyIndex = 0;
 uint8_t currentButton = 0;
-
+ 
 uint32_t randomNumber;
-
-#define BUTTON_ACTIVE_STATE  GPIO_PIN_RESET
-
+ 
 static const uint16_t simonColors[4] = {
-    ST7735_YELLOW, ST7735_RED, ST7735_BLUE, ST7735_GREEN   /* matches LED/button index order */
+    ST7735_YELLOW, ST7735_RED, ST7735_BLUE, ST7735_GREEN
 };
-
-GPIO_TypeDef* ledPorts[4] = { GPIOD, GPIOC, GPIOC, GPIOC };
-uint16_t ledPins[4] = {
-    GPIO_PIN_2,   // PD2  - yellow LED
-    GPIO_PIN_7,   // PC7  - red LED
-    GPIO_PIN_6,   // PC6  - blue LED
-    GPIO_PIN_10   // PC10 - green LED
-};
+ 
+GPIO_TypeDef* ledPorts[4] = { GPIOD, GPIOC, GPIOB, GPIOC };
+uint8_t       ledNums[4]  = { 2, 11, 0, 10 };
 
 GPIO_TypeDef* buttonPorts[4] = { GPIOC, GPIOC, GPIOC, GPIOC };
-uint16_t buttonPins[4] = {
-    GPIO_PIN_8,   // PC8 - yellow button
-    GPIO_PIN_9,   // PC9 - red button
-    GPIO_PIN_4,   // PC4 - blue button
-    GPIO_PIN_5    // PC5 - green button
-};
-
+uint8_t       buttonNums[4]  = { 0, 12, 4, 5 };
+ 
+static const int btnX[4] = { 36, 92, 92, 36 };
+static const int btnY[4] = { 100, 45, 100, 45 };
+ 
 uint8_t noteNumbers[4] = {0, 4, 7, 11};
-
-uint8_t noteOctave = 2;
-
+ 
+uint8_t noteOctave = 4;
+ 
 uint8_t gameRunning = 1;
 
 /* USER CODE END PV */
@@ -144,85 +139,132 @@ void Simon_GPIO_Init(void);
 void LEDs_AllOff(void);
 void LED_On(uint8_t led);
 int8_t Read_Button(void);
+uint8_t Button_Mask(void);
 void Play_Note(uint8_t led);
 void Generate_Sequence(void);
 void Show_Welcome(void);
 void Show_Countdown(void);
 void Play_Game_Sequence(void);
 void Show_Game_Over(void);
-void Show_Success(void);
+int  Show_Success(void);
+void Show_Win(void);
 void Update_Game_Display(void);
 void Draw_Game_Buttons(void);
 void Add_History(uint8_t button);
 void Reset_Game(void);
 void Wait_Button_Release(void);
+int  Check_Select_Abort(void);
+int  Delay_With_Abort(uint32_t ms);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void Wait_Button_Release(void)
-{
-    while (Read_Button() != -1)
-    {
-        HAL_Delay(10);
-    }
-
-    HAL_Delay(30);
-}
-
 void Simon_GPIO_Init(void)
 {
-    GPIO_InitTypeDef g = {0};
-
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOD_CLK_ENABLE();
-
-    /*push-pull outputs, start off */
-    for (int i = 0; i < 4; i++)
-        HAL_GPIO_WritePin(ledPorts[i], ledPins[i], GPIO_PIN_RESET);
-
-    g.Mode  = GPIO_MODE_OUTPUT_PP;
-    g.Pull  = GPIO_NOPULL;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
+    RCC->AHB2ENR |= (RCC_AHB2ENR_GPIOBEN | RCC_AHB2ENR_GPIOCEN | RCC_AHB2ENR_GPIODEN);
+    __IO uint32_t tmpreg = RCC->AHB2ENR;
+    (void)tmpreg;
+ 
     for (int i = 0; i < 4; i++)
     {
-        g.Pin = ledPins[i];
-        HAL_GPIO_Init(ledPorts[i], &g);
+        ledPorts[i]->MODER &= ~(3u << (ledNums[i] * 2));
+        ledPorts[i]->MODER |=  (1u << (ledNums[i] * 2));
+ 
+        buttonPorts[i]->MODER &= ~(3u << (buttonNums[i] * 2));
+        buttonPorts[i]->PUPDR &= ~(3u << (buttonNums[i] * 2));
+        buttonPorts[i]->PUPDR |=  (1u << (buttonNums[i] * 2));
     }
-
-    /*inputs with pull-ups IMPORTANT TO NOTE THAT THEY ARE PULL UPS*/
-    g.Mode = GPIO_MODE_INPUT;
-    g.Pull = GPIO_PULLUP;
-    for (int i = 0; i < 4; i++)
-    {
-        g.Pin = buttonPins[i];
-        HAL_GPIO_Init(buttonPorts[i], &g);
-    }
+ 
+    LEDs_AllOff();
 }
-
+ 
 void LEDs_AllOff(void)
 {
     for (int i = 0; i < 4; i++)
-        HAL_GPIO_WritePin(ledPorts[i], ledPins[i], GPIO_PIN_RESET);
+        ledPorts[i]->ODR &= ~(1u << ledNums[i]);
 }
-
+ 
 void LED_On(uint8_t led)
 {
     LEDs_AllOff();
     if (led < 4)
-        HAL_GPIO_WritePin(ledPorts[led], ledPins[led], GPIO_PIN_SET);
+        ledPorts[led]->ODR |= (1u << ledNums[led]);
 }
-
-int8_t Read_Button(void)
+ 
+uint8_t Button_Mask(void)
 {
+    uint8_t m = 0;
     for (int i = 0; i < 4; i++)
     {
-        if (HAL_GPIO_ReadPin(buttonPorts[i], buttonPins[i]) == BUTTON_ACTIVE_STATE)
+        if ((buttonPorts[i]->IDR & (1u << buttonNums[i])) == 0)
+            m |= (1u << i);
+    }
+    return m;
+}
+ 
+int8_t Read_Button(void)
+{
+    uint8_t m = Button_Mask();
+    for (int i = 0; i < 4; i++)
+    {
+        if (m & (1u << i))
             return i;
     }
     return -1;
 }
-
+ 
+int Check_Select_Abort(void)
+{
+    static uint32_t lastCheck = 0;
+    uint32_t now = HAL_GetTick();
+ 
+    if ((now - lastCheck) < 20)
+        return 0;
+    lastCheck = now;
+ 
+    if (!SELECT_PRESSED())
+        return 0;
+ 
+    while (SELECT_PRESSED())
+        HAL_Delay(10);
+    HAL_Delay(30);
+ 
+    Reset_Game();
+    Show_Welcome();
+    return 1;
+}
+ 
+int Delay_With_Abort(uint32_t ms)
+{
+    for (uint32_t t = 0; t < ms; t += 10)
+    {
+        DWT_delayMs(10);
+        if (Check_Select_Abort())
+            return 1;
+    }
+    return 0;
+}
+ 
+void Wait_Button_Release(void)
+{
+    uint32_t start = HAL_GetTick();
+    uint8_t last = Button_Mask();
+ 
+    while ((Button_Mask() & (1u << currentButton)) && ((HAL_GetTick() - start) < 1000))
+    {
+        uint8_t m = Button_Mask();
+        if (m != last)
+        {
+            last = m;
+            Draw_Game_Buttons();
+        }
+        HAL_Delay(5);
+    }
+ 
+    Draw_Game_Buttons();
+    HAL_Delay(30);
+}
+ 
 void Play_Note(uint8_t led)
 {
     if (led < 4)
@@ -231,227 +273,229 @@ void Play_Note(uint8_t led)
         buzzerEnable(&buzzer1);
     }
 }
-
+ 
 void Generate_Sequence(void)
 {
     if (HAL_RNG_GenerateRandomNumber(&hrng, &randomNumber) == HAL_OK)
-    {
         sequence[level - 1] = randomNumber % 4;
-    }
     else
-    {
         sequence[level - 1] = 0;
+}
+ 
+void Add_History(uint8_t button)
+{
+    if (historyIndex < MAX_SEQUENCE)
+    {
+        playerHistory[historyIndex] = button;
+        historyIndex++;
     }
 }
-
+ 
 void Show_Welcome(void)
 {
     LEDs_AllOff();
     buzzerDisable(&buzzer1);
-
+ 
     Display_fillScreen(ST7735_BLACK);
-
+ 
     Display_setTextColor(ST7735_WHITE);
     Display_setTextSize(2, 2);
-    Display_setCursor(35, 25);
+    Display_setCursor(34, 30);
     Display_print("SIMON");
-
+ 
     Display_setTextSize(1, 1);
-    Display_setCursor(15, 65);
+    Display_setCursor(30, 70);
     Display_print("Memory Game");
-
-    Display_setCursor(10, 105);
-    Display_print("Press SELECT to start");
+ 
+    Display_setCursor(30, 110);
+    Display_print("Press SELECT");
+    Display_setCursor(40, 122);
+    Display_print("to start");
 }
-
+ 
 void Show_Countdown(void)
 {
     for (int i = 3; i > 0; i--)
     {
-        uint32_t buttons = TFTShield18_readButtons();
-
-        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
-        {
-            gameState = GAME_STATE_WELCOME;
-            return;
-        }
-
         Display_fillScreen(ST7735_BLACK);
         Display_setTextColor(ST7735_WHITE);
         Display_setTextSize(3, 3);
-        Display_setCursor(65, 45);
-
+        Display_setCursor(52, 60);
+ 
         char number[2] = {(char)('0' + i), '\0'};
         Display_print(number);
-
-        DWT_delayMs(1000);
+ 
+        if (Delay_With_Abort(1000))
+            return;
     }
-
+ 
     gameState = GAME_STATE_PLAY_SEQUENCE;
 }
-
+ 
 void Play_Game_Sequence(void)
 {
+    uint32_t onMs = (level < 30) ? (400 - (level * 10)) : 100;
+ 
+    historyIndex = 0;
+ 
     for (int i = 0; i < level; i++)
     {
-        uint32_t buttons = TFTShield18_readButtons();
-        if ((buttons & TFTSHIELD_BUTTON_IN) == 0)
-        {
-            gameState = GAME_STATE_WELCOME;
-            return;
-        }
-
         LED_On(sequence[i]);
         Play_Note(sequence[i]);
-
-        DWT_delayMs(400);
-
+ 
+        if (Delay_With_Abort(onMs))
+            return;
+ 
         buzzerDisable(&buzzer1);
         LEDs_AllOff();
-
-        DWT_delayMs(250);
+ 
+        if (Delay_With_Abort(250))
+            return;
     }
-
+ 
     inputIndex = 0;
     gameState = GAME_STATE_WAIT_INPUT;
-
+ 
     Update_Game_Display();
 }
-
-void Add_History(uint8_t button)
-{
-    playerHistory[historyIndex % MAX_SEQUENCE] = button;
-    historyIndex++;
-}
-
+ 
 void Draw_Game_Buttons(void)
 {
-
-    int xPositions[4] = {15, 85, 15, 85};
-    int yPositions[4] = {30, 30, 95, 95};
-
+    uint8_t mask = Button_Mask();
+ 
     for (int i = 0; i < 4; i++)
     {
-        uint8_t pressed = HAL_GPIO_ReadPin(buttonPorts[i], buttonPins[i]) == BUTTON_ACTIVE_STATE;
-
-        Display_fillCircle(
-            xPositions[i],
-            yPositions[i],
-            22,
-            pressed ? simonColors[i] : ST7735_WHITE
-        );
+        uint8_t pressed = (mask & (1u << i)) ? 1 : 0;
+ 
+        Display_fillCircle(btnX[i], btnY[i], 22,
+                           pressed ? simonColors[i] : ST7735_WHITE);
     }
 }
-
+ 
 void Update_Game_Display(void)
 {
     Display_fillScreen(ST7735_BLACK);
-
+ 
     Display_setTextColor(ST7735_WHITE);
     Display_setTextSize(1, 1);
-
+ 
     Display_setCursor(5, 5);
     Display_print("Level: ");
-
+ 
     char score[4] = {
         (char)('0' + level / 10),
         (char)('0' + level % 10),
         '\0'
     };
-
     Display_print(score);
-
+ 
     Draw_Game_Buttons();
-
+ 
     Display_setCursor(5, 135);
     Display_print("Last buttons:");
-
-    uint16_t colors[4] = {
-        ST7735_RED,
-        ST7735_BLUE,
-        ST7735_GREEN,
-        ST7735_YELLOW
-    };
-
-    uint8_t count = historyIndex < 5 ? historyIndex : 5;
-
+ 
+    uint8_t count = (historyIndex < 5) ? historyIndex : 5;
+ 
     for (int i = 0; i < count; i++)
     {
-        uint8_t index = (historyIndex - count + i) % MAX_SEQUENCE;
-
-        Display_fillCircle(
-            15 + (i * 25),
-            150,
-            7,
-            simonColors[playerHistory[index]]
-        );
+        uint8_t index = historyIndex - count + i;
+ 
+        Display_fillCircle(15 + (i * 22), 150, 7,
+                           simonColors[playerHistory[index]]);
     }
 }
-
-void Show_Success(void)
+ 
+int Show_Success(void)
 {
     Display_fillScreen(ST7735_BLACK);
-
+ 
     Display_setTextColor(ST7735_GREEN);
     Display_setTextSize(2, 2);
     Display_setCursor(10, 45);
     Display_print("Correct!");
-
+ 
     Display_setTextSize(1, 1);
-    Display_setCursor(20, 90);
-    Display_print("Next level!");
-
-    DWT_delayMs(1000);
+    Display_setCursor(10, 90);
+    Display_print("Simon says,");
+    Display_setCursor(10, 102);
+    Display_print("\"That's correct!\"");
+ 
+    return Delay_With_Abort(1000);
 }
-
+ 
+void Show_Win(void)
+{
+    Display_fillScreen(ST7735_BLACK);
+ 
+    Display_setTextColor(ST7735_GREEN);
+    Display_setTextSize(2, 2);
+    Display_setCursor(15, 45);
+    Display_print("YOU WIN!");
+ 
+    Display_setTextSize(1, 1);
+    Display_setCursor(15, 90);
+    Display_print("All 32 levels done");
+ 
+    for (int i = 0; i < 12; i++)
+    {
+        LED_On(i % 4);
+        Play_Note(i % 4);
+        DWT_delayMs(150);
+        LEDs_AllOff();
+        buzzerDisable(&buzzer1);
+    }
+ 
+    Reset_Game();
+}
+ 
 void Show_Game_Over(void)
 {
     Display_fillScreen(ST7735_BLACK);
-
+ 
     Display_setTextColor(ST7735_RED);
     Display_setTextSize(2, 2);
     Display_setCursor(10, 45);
     Display_print("GAME OVER");
-
+ 
     Display_setTextSize(1, 1);
     Display_setCursor(20, 90);
     Display_print("Returning to menu");
-
+ 
     for (int i = 0; i < 20; i++)
     {
-        uint32_t buttons = TFTShield18_readButtons();
-
-        if ((buttons & TFTSHIELD_BUTTON_IN) == (buttons & ~TFTSHIELD_BUTTON_IN))
+        if (SELECT_PRESSED())
             break;
-
+ 
         uint32_t randomValue;
-
+ 
         if (HAL_RNG_GenerateRandomNumber(&hrng, &randomValue) == HAL_OK)
         {
             uint8_t led = randomValue % 4;
-
             LED_On(led);
             Play_Note(led);
         }
-
+ 
         DWT_delayMs(100);
-
+ 
         LEDs_AllOff();
         buzzerDisable(&buzzer1);
     }
-
+ 
+    while (SELECT_PRESSED())
+        HAL_Delay(10);
+ 
     Reset_Game();
 }
-
+ 
 void Reset_Game(void)
 {
     LEDs_AllOff();
     buzzerDisable(&buzzer1);
-
+ 
     level = 1;
     inputIndex = 0;
     historyIndex = 0;
-
+ 
     gameState = GAME_STATE_WELCOME;
 }
 /* USER CODE END 0 */
@@ -524,116 +568,133 @@ int main(void)
       {
           case GAME_STATE_WELCOME:
           {
-              uint32_t buttons = TFTShield18_readButtons();
-
-              if ((buttons & TFTSHIELD_BUTTON_IN) == 0)
+              if (SELECT_PRESSED())
               {
+                  while (SELECT_PRESSED())
+                      HAL_Delay(10);
+                  HAL_Delay(30);
+ 
                   level = 1;
                   inputIndex = 0;
                   historyIndex = 0;
-
+ 
                   Generate_Sequence();
-
+ 
                   gameState = GAME_STATE_COUNTDOWN;
               }
-
               break;
           }
-
+ 
           case GAME_STATE_COUNTDOWN:
           {
               Show_Countdown();
               break;
           }
-
+ 
           case GAME_STATE_PLAY_SEQUENCE:
           {
               Play_Game_Sequence();
               break;
           }
-
+ 
           case GAME_STATE_WAIT_INPUT:
           {
-            int8_t button = -1;
-            uint32_t startTime = HAL_GetTick(); // Capture current uptime millisecond ticker
-            
-            // Poll loop waiting for a button or a 2000ms timeout
-            while ((HAL_GetTick() - startTime < 2000) && (button == -1))
-            {
-                button = Read_Button();
-            }
-
-            if (button != -1)
-            {
-                currentButton = button;
-                LED_On(currentButton);
-                Play_Note(currentButton);
-                Add_History(currentButton);
-                Update_Game_Display();
-                gameState = GAME_STATE_CHECK_INPUT;
-            }
-            else
-            {
-                // 2 seconds passed with no input
-                gameState = GAME_STATE_GAME_OVER;
-            }
-            break;
-          }
-
-          case GAME_STATE_CHECK_INPUT:
-          {
-              if (currentButton == sequence[inputIndex])
+              int8_t button = -1;
+              int aborted = 0;
+              uint32_t startTime = HAL_GetTick();
+              uint8_t lastMask = Button_Mask();
+ 
+              while (((HAL_GetTick() - startTime) < INPUT_TIMEOUT_MS) && (button == -1))
               {
-                  inputIndex++;
-
-                  Wait_Button_Release();
-
-                  LEDs_AllOff();
-                  buzzerDisable(&buzzer1);
-
-                  if (inputIndex >= level)
+                  if (Check_Select_Abort())
                   {
-                      gameState = GAME_STATE_SUCCESS;
+                      aborted = 1;
+                      break;
                   }
-                  else
+ 
+                  uint8_t m = Button_Mask();
+                  if (m != lastMask)
                   {
-                      gameState = GAME_STATE_WAIT_INPUT;
+                      lastMask = m;
+                      Draw_Game_Buttons();
                   }
+ 
+                  button = Read_Button();
+              }
+ 
+              if (aborted)
+                  break;
+ 
+              if (button != -1)
+              {
+                  currentButton = button;
+                  LED_On(currentButton);
+                  Play_Note(currentButton);
+                  Add_History(currentButton);
+                  Update_Game_Display();
+                  gameState = GAME_STATE_CHECK_INPUT;
               }
               else
               {
                   gameState = GAME_STATE_GAME_OVER;
               }
-
               break;
           }
-
+ 
+          case GAME_STATE_CHECK_INPUT:
+          {
+              if (currentButton == sequence[inputIndex])
+              {
+                  inputIndex++;
+ 
+                  Wait_Button_Release();
+ 
+                  LEDs_AllOff();
+                  buzzerDisable(&buzzer1);
+ 
+                  if (inputIndex >= level)
+                      gameState = GAME_STATE_SUCCESS;
+                  else
+                      gameState = GAME_STATE_WAIT_INPUT;
+              }
+              else
+              {
+                  gameState = GAME_STATE_GAME_OVER;
+              }
+              break;
+          }
+ 
           case GAME_STATE_SUCCESS:
           {
-              Show_Success();
-
-              level++;
-
-              if (level >= MAX_SEQUENCE)
+              if (Show_Success())
+                  break;
+ 
+              if (level >= WIN_LEVEL)
               {
-                  level = 1;
+                  gameState = GAME_STATE_WIN;
+                  break;
               }
-
+ 
+              level++;
               Generate_Sequence();
-
               gameState = GAME_STATE_PLAY_SEQUENCE;
-
               break;
           }
-
+ 
+          case GAME_STATE_WIN:
+          {
+              Show_Win();
+              Show_Welcome();
+              break;
+          }
+ 
           case GAME_STATE_GAME_OVER:
           {
               Show_Game_Over();
               Show_Welcome();
-
               break;
           }
-
+ 
           default:
           {
               Reset_Game();
