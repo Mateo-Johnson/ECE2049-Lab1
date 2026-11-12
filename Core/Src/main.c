@@ -236,9 +236,10 @@ int Check_Select_Abort(void)
  
 int Delay_With_Abort(uint32_t ms)
 {
-    for (uint32_t t = 0; t < ms; t += 10)
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < ms)
     {
-        DWT_delayMs(10);
+        DWT_delayMs(5);
         if (Check_Select_Abort())
             return 1;
     }
@@ -556,7 +557,7 @@ int main(void)
                  DISP_DCX_SEL_Pin, DISP_DCX_SEL_GPIO_Port);
 
   Display_init(INITR_BLACKTAB);
-  Display_setRotation(1);
+  Display_setRotation(0);
 
   TFTShield18_setBacklight(TFTSHIELD_BACKLIGHT_ON);
 
