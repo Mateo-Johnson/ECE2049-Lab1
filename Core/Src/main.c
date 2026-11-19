@@ -46,6 +46,7 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define SET_BUZZER_VOLUME(vol) \ __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (__HAL_TIM_GET_AUTORELOAD(&htim1) * (vol)) / 200)
 
 /* USER CODE END PM */
 
@@ -699,6 +700,7 @@ int main(void)
   MX_RNG_Init();
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  SET_BUZZER_VOLUME(50);
   DWT_Init();
   Game_GPIO_Init();
   Song_Init();
