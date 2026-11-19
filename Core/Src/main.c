@@ -70,58 +70,117 @@ Buzzer buzzer1 = {
   TIM_CHANNEL_1,
   false
 };
- 
+
 extern Note const chromaticScale[NUM_NOTES];
- 
-#define MAX_SEQUENCE      33
-#define WIN_LEVEL         32
-#define INPUT_TIMEOUT_MS  5000
- 
+
 #define SELECT_PRESSED()  ((TFTShield18_readButtons() & TFTSHIELD_BUTTON_IN) == 0)
- 
+
+/* ---- Colors (RGB565) ---- */
+#define COLOR_GRAY    0x7BEF
+#define COLOR_DKGRAY  0x2104
+
+/* ---- Screen layout (128 x 160, rotation 0): 4 lanes, 32 px each ---- */
+#define NUM_LANES       4
+#define LANE_W          32
+#define SCORE_BAR_H     12
+#define TOP_Y           14      /* y where a note appears                    */
+#define HIT_Y           120     /* y of a note's top edge at the perfect time*/
+#define NOTE_H          10
+#define NOTE_W          24
+#define NOTE_BOTTOM_Y   140     /* last y a note is drawn at                 */
+#define KEY_Y           150     /* row of "key" indicators at the bottom     */
+#define KEY_H           9
+
+/* ---- Timing (all in milliseconds) ---- */
+#define MS_PER_PX         10                                /* fall speed 0.1 px/ms */
+#define TRAVEL_MS         ((HIT_Y - TOP_Y) * MS_PER_PX)     /* spawn -> hit line    */
+#define HIT_WINDOW_MS     150     /* +/- this much around the perfect time counts */
+#define NOTE_GAP_MS       40      /* silence at end of each note (articulation)   */
+#define FRAME_MS          40      /* display refresh period (25 fps)              */
+#define SELECT_LOCKOUT_MS 50      /* software debounce for SELECT                 */
+#define WIN_PERCENT       60      /* % of notes that must be hit to win           */
+
+/* ---- Song data structure -------------------------------------------------
+ * One entry per note: which lane/button, which chromatic note + octave to
+ * buzz, and how long until the NEXT note starts. 6 bytes per note after
+ * padding -> 32 notes = 192 bytes (const, lives in flash).
+ * Lane <-> pitch is fixed, so a given note always uses the same button/color:
+ *   lane 0 = G4 (S1)   lane 1 = Bb4 (S2)   lane 2 = C5 (S3)   lane 3 = Db5 (S4)
+ * (assumes chromaticScale[0] = C, [1] = C#/Db, ... [7] = G, [10] = A#/Bb)
+ * ------------------------------------------------------------------------ */
+typedef struct
+{
+    uint8_t  lane;
+    uint8_t  note;        /* index into chromaticScale */
+    uint8_t  octave;
+    uint16_t durationMs;  /* time from this note's start to the next one's */
+} SongNote;
+
+#define G4(d)   { 0,  7, 4, (d) }
+#define BB4(d)  { 1, 10, 4, (d) }
+#define C5(d)   { 2,  0, 5, (d) }
+#define DB5(d)  { 3,  1, 5, (d) }
+
+/* "Smoke on the Water" riff - 32 notes, 4 pitches to the best of my memors */
+static const SongNote song[] = {
+    /* phrase 1 */ G4(600), BB4(600), C5(900),
+    /* phrase 2 */ G4(600), BB4(600), DB5(300), C5(900),
+    /* phrase 3 */ G4(600), BB4(600), C5(900), BB4(600), G4(1200),
+    /* repeat   */ G4(600), BB4(600), C5(900),
+                   G4(600), BB4(600), DB5(300), C5(900),
+                   G4(600), BB4(600), C5(900), BB4(600), G4(1200),
+    /* ending   */ G4(600), BB4(600), C5(900),
+                   G4(600), BB4(600), DB5(300), C5(900),
+                   G4(1200)
+};
+#define SONG_LEN  ((uint8_t)(sizeof(song) / sizeof(song[0])))
+
+static const uint16_t laneColors[NUM_LANES] = {
+    ST7735_YELLOW, ST7735_RED, ST7735_BLUE, ST7735_GREEN
+};
+
+enum { NOTE_PENDING = 0, NOTE_HIT = 1, NOTE_MISSED = 2 };
+
 typedef enum
 {
     GAME_STATE_WELCOME = 0,
     GAME_STATE_COUNTDOWN,
-    GAME_STATE_PLAY_SEQUENCE,
-    GAME_STATE_WAIT_INPUT,
-    GAME_STATE_CHECK_INPUT,
-    GAME_STATE_SUCCESS,
-    GAME_STATE_WIN,
-    GAME_STATE_GAME_OVER
+    GAME_STATE_PLAYING,
+    GAME_STATE_RESULT
 } GameState;
- 
-GameState gameState = GAME_STATE_WELCOME;
- 
-uint8_t sequence[MAX_SEQUENCE];
-uint8_t playerHistory[MAX_SEQUENCE];
- 
-uint8_t level = 1;
-uint8_t inputIndex = 0;
-uint8_t historyIndex = 0;
-uint8_t currentButton = 0;
- 
-uint32_t randomNumber;
- 
-static const uint16_t simonColors[4] = {
-    ST7735_YELLOW, ST7735_RED, ST7735_BLUE, ST7735_GREEN
-};
- 
+
+/* ---- State shared between ISR and main loop ---- */
+volatile GameState gameState  = GAME_STATE_WELCOME;
+volatile uint32_t  g_ms       = 0;     
+volatile uint32_t  countdownMs = 0;
+volatile uint32_t  songTimeMs  = 0;   
+volatile uint8_t   hits = 0, misses = 0;
+volatile uint8_t   scoreDirty = 0;    
+volatile uint8_t   frameFlag  = 0; 
+volatile uint8_t   noteStatus[SONG_LEN];
+
+/* ---- ISR-private song state ---- */
+uint32_t noteHitTime[SONG_LEN];     
+uint32_t songEndMs = 0;
+uint8_t  nextNote = 0;           
+uint8_t  missScanIdx = 0;     
+uint8_t  prevMask = 0;
+uint8_t  frameDiv = 0;
+uint8_t  buzzerOn = 0;
+uint32_t noteOffAt = 0;
+
+/* ---- Main-loop-private drawing state ---- */
+int16_t prevY[SONG_LEN];
+uint8_t drawnStatus[SONG_LEN];
+uint8_t lastKeyMask = 0xFF;
+uint8_t lastCountNum = 0;
+
+/* External LEDs amd buttons */
 GPIO_TypeDef* ledPorts[4] = { GPIOD, GPIOC, GPIOB, GPIOC };
 uint8_t       ledNums[4]  = { 2, 11, 0, 10 };
 
 GPIO_TypeDef* buttonPorts[4] = { GPIOC, GPIOC, GPIOC, GPIOC };
 uint8_t       buttonNums[4]  = { 0, 12, 4, 5 };
- 
-static const int btnX[4] = { 36, 92, 92, 36 };
-static const int btnY[4] = { 100, 45, 100, 45 };
- 
-uint8_t noteNumbers[4] = {0, 4, 7, 11};
- 
-uint8_t noteOctave = 4;
- 
-uint8_t gameRunning = 1;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -135,62 +194,52 @@ static void MX_SPI2_Init(void);
 static void MX_RNG_Init(void);
 static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
-void Simon_GPIO_Init(void);
+void Game_GPIO_Init(void);
+void Game_Timer_Init(void);
+void LEDs_Set(uint8_t mask);
 void LEDs_AllOff(void);
-void LED_On(uint8_t led);
-int8_t Read_Button(void);
 uint8_t Button_Mask(void);
-void Play_Note(uint8_t led);
-void Generate_Sequence(void);
-void Show_Welcome(void);
-void Show_Countdown(void);
-void Play_Game_Sequence(void);
-void Show_Game_Over(void);
-int  Show_Success(void);
-void Show_Win(void);
-void Update_Game_Display(void);
-void Draw_Game_Buttons(void);
-void Add_History(uint8_t button);
-void Reset_Game(void);
-void Wait_Button_Release(void);
-int  Check_Select_Abort(void);
-int  Delay_With_Abort(uint32_t ms);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void Simon_GPIO_Init(void)
+void Game_GPIO_Init(void)
 {
     RCC->AHB2ENR |= (RCC_AHB2ENR_GPIOBEN | RCC_AHB2ENR_GPIOCEN | RCC_AHB2ENR_GPIODEN);
     __IO uint32_t tmpreg = RCC->AHB2ENR;
     (void)tmpreg;
- 
+
     for (int i = 0; i < 4; i++)
     {
+        /* LED pin = output */
         ledPorts[i]->MODER &= ~(3u << (ledNums[i] * 2));
         ledPorts[i]->MODER |=  (1u << (ledNums[i] * 2));
- 
+
+        /* button pin = input with pull-up (pressed reads 0) */
         buttonPorts[i]->MODER &= ~(3u << (buttonNums[i] * 2));
         buttonPorts[i]->PUPDR &= ~(3u << (buttonNums[i] * 2));
         buttonPorts[i]->PUPDR |=  (1u << (buttonNums[i] * 2));
     }
- 
     LEDs_AllOff();
 }
- 
-void LEDs_AllOff(void)
+
+void LEDs_Set(uint8_t mask)
 {
     for (int i = 0; i < 4; i++)
-        ledPorts[i]->ODR &= ~(1u << ledNums[i]);
+    {
+        if (mask & (1u << i))
+            ledPorts[i]->ODR |=  (1u << ledNums[i]);
+        else
+            ledPorts[i]->ODR &= ~(1u << ledNums[i]);
+    }
 }
- 
-void LED_On(uint8_t led)
+
+void LEDs_AllOff(void)
 {
-    LEDs_AllOff();
-    if (led < 4)
-        ledPorts[led]->ODR |= (1u << ledNums[led]);
+    LEDs_Set(0);
 }
- 
+
+/* REQUIREMENT 1: bit i = 1 when button S(i+1) is pressed (S1 -> 0x01, S3 -> 0x04) */
 uint8_t Button_Mask(void)
 {
     uint8_t m = 0;
@@ -201,304 +250,414 @@ uint8_t Button_Mask(void)
     }
     return m;
 }
- 
-int8_t Read_Button(void)
+
+/* ---------------------------- TIM2 : 1 ms tick -------------------------- */
+void Game_Timer_Init(void)
+{
+    RCC->APB1LENR |= RCC_APB1LENR_TIM2EN;
+    __IO uint32_t tmp = RCC->APB1LENR;
+    (void)tmp;
+
+    TIM2->CR1  = 0;
+    TIM2->PSC  = (HAL_RCC_GetPCLK1Freq() / 1000000u) - 1u;
+    TIM2->ARR  = 1000u - 1u;
+    TIM2->EGR  = TIM_EGR_UG;
+    TIM2->SR   = ~TIM_SR_UIF;
+    TIM2->DIER |= TIM_DIER_UIE;
+
+    HAL_NVIC_SetPriority(TIM2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+/* Timer-based wait, used ONLY once at start-up for the shield reset. */
+static void Wait_Ms_Timer(uint32_t ms)
+{
+    uint32_t start = g_ms;
+    while ((g_ms - start) < ms) { }
+}
+
+/* ---------------------------- Song / game logic ------------------------- */
+static void Song_Init(void)
+{
+    uint32_t t = TRAVEL_MS;
+    for (int i = 0; i < SONG_LEN; i++)
+    {
+        noteHitTime[i] = t;
+        t += song[i].durationMs;
+    }
+    songEndMs = t;
+}
+
+static void Start_Game(void)
+{
+    for (int i = 0; i < SONG_LEN; i++)
+        noteStatus[i] = NOTE_PENDING;
+
+    hits = 0;
+    misses = 0;
+    songTimeMs = 0;
+    nextNote = 0;
+    missScanIdx = 0;
+    buzzerOn = 0;
+    frameDiv = 0;
+    frameFlag = 0;
+    scoreDirty = 1;
+    prevMask = Button_Mask();
+
+    countdownMs = 3000;
+    gameState = GAME_STATE_COUNTDOWN;
+}
+
+static void Reset_Game(void)
+{
+    gameState = GAME_STATE_WELCOME;
+    buzzerDisable(&buzzer1);
+    LEDs_AllOff();
+}
+
+static void Judge_Press(uint8_t lane)
+{
+    uint32_t t = songTimeMs;
+
+    for (uint8_t i = missScanIdx; i < SONG_LEN; i++)
+    {
+        if (noteHitTime[i] > (t + HIT_WINDOW_MS))
+            break;
+
+        if (noteStatus[i] == NOTE_PENDING &&
+            song[i].lane == lane &&
+            (noteHitTime[i] + HIT_WINDOW_MS) >= t)
+        {
+            noteStatus[i] = NOTE_HIT;
+            hits++;
+            scoreDirty = 1;
+            return;
+        }
+    }
+}
+
+static void Play_Tick(void)
+{
+    songTimeMs++;
+    uint32_t t = songTimeMs;
+
+    /* --- buzzer: start each note at its hit time, stop it before the next --- */
+    if (nextNote < SONG_LEN && t >= noteHitTime[nextNote])
+    {
+        buzzerSetNote(&buzzer1, chromaticScale[song[nextNote].note], song[nextNote].octave);
+        buzzerEnable(&buzzer1);
+        noteOffAt = t + song[nextNote].durationMs - NOTE_GAP_MS;
+        buzzerOn = 1;
+        nextNote++;
+    }
+    if (buzzerOn && t >= noteOffAt)
+    {
+        buzzerDisable(&buzzer1);
+        buzzerOn = 0;
+    }
+
+    /* --- buttons: LEDs follow presses; new presses are judged every 5 ms --- */
+    uint8_t mask = Button_Mask();
+    LEDs_Set(mask);
+
+    if ((t % 5) == 0)
+    {
+        uint8_t pressed = mask & (uint8_t)~prevMask;   /* newly pressed only */
+        prevMask = mask;
+        for (uint8_t lane = 0; lane < NUM_LANES; lane++)
+        {
+            if (pressed & (1u << lane))
+                Judge_Press(lane);
+        }
+    }
+
+    /* --- notes whose window has fully passed become misses --- */
+    while (missScanIdx < SONG_LEN &&
+           (noteHitTime[missScanIdx] + HIT_WINDOW_MS) < t)
+    {
+        if (noteStatus[missScanIdx] == NOTE_PENDING)
+        {
+            noteStatus[missScanIdx] = NOTE_MISSED;
+            misses++;
+            scoreDirty = 1;
+        }
+        missScanIdx++;
+    }
+
+    if (++frameDiv >= FRAME_MS)
+    {
+        frameDiv = 0;
+        frameFlag = 1;
+    }
+
+    if (t >= songEndMs)
+    {
+        for (uint8_t i = 0; i < SONG_LEN; i++)
+        {
+            if (noteStatus[i] == NOTE_PENDING)
+            {
+                noteStatus[i] = NOTE_MISSED;
+                misses++;
+            }
+        }
+        buzzerDisable(&buzzer1);
+        buzzerOn = 0;
+        LEDs_AllOff();
+        gameState = GAME_STATE_RESULT;
+    }
+}
+
+/* Called from TIM2_IRQHandler every 1 ms */
+static void Game_Tick(void)
+{
+    g_ms++;
+
+    switch (gameState)
+    {
+        case GAME_STATE_COUNTDOWN:
+            if (countdownMs > 0)
+                countdownMs--;
+            if (countdownMs == 0)
+                gameState = GAME_STATE_PLAYING; //2c
+            break;
+
+        case GAME_STATE_PLAYING:
+            Play_Tick();
+            break;
+
+        default:
+            break;
+    }
+}
+
+static uint8_t Select_Event(void)
+{
+    static uint8_t  prev = 0;
+    static uint32_t lastAccepted = 0;
+
+    uint8_t now = SELECT_PRESSED() ? 1 : 0;
+    uint8_t ev = 0;
+
+    if (now && !prev && (g_ms - lastAccepted) >= SELECT_LOCKOUT_MS)
+    {
+        lastAccepted = g_ms;
+        ev = 1;
+    }
+    prev = now;
+    return ev;
+}
+static void Print_Num(uint8_t v)
+{
+    char b[4];
+    uint8_t n = 0;
+
+    if (v >= 100)
+    {
+        b[n++] = (char)('0' + v / 100);
+        v %= 100;
+        b[n++] = (char)('0' + v / 10);
+    }
+    else if (v >= 10)
+    {
+        b[n++] = (char)('0' + v / 10);
+    }
+    b[n++] = (char)('0' + v % 10);
+    b[n] = '\0';
+    Display_print(b);
+}
+static void Show_Welcome(void)
+{
+    Display_fillScreen(ST7735_BLACK);
+
+    Display_setTextColor(ST7735_YELLOW);
+    Display_setTextSize(2, 2);
+    Display_setCursor(28, 25);
+    Display_print("GUITAR");
+    Display_setCursor(40, 45);
+    Display_print("HERO");
+
+    Display_setTextColor(ST7735_WHITE);
+    Display_setTextSize(1, 1);
+    Display_setCursor(10, 100);
+    Display_print("Press the joystick");
+    Display_setCursor(40, 112);
+    Display_print("to begin");
+}
+
+static void Show_Countdown_Screen(void)
+{
+    Display_fillScreen(ST7735_BLACK);
+    Display_setTextColor(ST7735_WHITE);
+    Display_setTextSize(1, 1);
+    Display_setCursor(36, 30);
+    Display_print("Get ready!");
+    lastCountNum = 0;
+}
+
+static void Update_Countdown(void)
+{
+    uint8_t num = (uint8_t)((countdownMs + 999u) / 1000u);
+
+    if (num != 0 && num != lastCountNum)
+    {
+        lastCountNum = num;
+        Display_fillRect(44, 56, 40, 40, ST7735_BLACK);
+        Display_setTextColor(ST7735_WHITE);
+        Display_setTextSize(4, 4);
+        Display_setCursor(52, 60);
+        char s[2] = { (char)('0' + num), '\0' };
+        Display_print(s);
+    }
+}
+
+static void Draw_Score_Bar(void)
+{
+    Display_fillRect(0, 0, 128, SCORE_BAR_H, ST7735_BLACK);
+    Display_setTextColor(ST7735_WHITE);
+    Display_setTextSize(1, 1);
+    Display_setCursor(2, 2);
+    Display_print("Hit ");
+    Print_Num(hits);
+    Display_print("   Miss ");
+    Print_Num(misses);
+}
+static void Draw_Keys(void)
 {
     uint8_t m = Button_Mask();
-    for (int i = 0; i < 4; i++)
+    if (m == lastKeyMask)
+        return;
+    lastKeyMask = m;
+
+    for (int i = 0; i < NUM_LANES; i++)
     {
-        if (m & (1u << i))
-            return i;
+        Display_fillRect(i * LANE_W + 2, KEY_Y, LANE_W - 4, KEY_H,
+                         (m & (1u << i)) ? laneColors[i] : COLOR_DKGRAY);
     }
-    return -1;
 }
- 
-int Check_Select_Abort(void)
+
+static void Draw_Play_Static(void)
 {
-    static uint32_t lastCheck = 0;
-    uint32_t now = HAL_GetTick();
- 
-    if ((now - lastCheck) < 20)
-        return 0;
-    lastCheck = now;
- 
-    if (!SELECT_PRESSED())
-        return 0;
- 
-    while (SELECT_PRESSED())
-        HAL_Delay(10);
-    HAL_Delay(30);
- 
-    Reset_Game();
-    Show_Welcome();
-    return 1;
-}
- 
-int Delay_With_Abort(uint32_t ms)
-{
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < ms)
+    Display_fillScreen(ST7735_BLACK);
+
+    for (int i = 1; i < NUM_LANES; i++)
+        Display_fillRect(i * LANE_W, TOP_Y, 1, (KEY_Y + KEY_H) - TOP_Y, COLOR_DKGRAY);
+
+    for (int i = 0; i < SONG_LEN; i++)
     {
-        DWT_delayMs(5);
-        if (Check_Select_Abort())
-            return 1;
+        prevY[i] = -1;
+        drawnStatus[i] = NOTE_PENDING;
     }
-    return 0;
+    Draw_Score_Bar();
+    lastKeyMask = 0xFF;
+    Draw_Keys();
 }
- 
-void Wait_Button_Release(void)
+static void Draw_Play_Frame(void)
 {
-    uint32_t start = HAL_GetTick();
-    uint8_t last = Button_Mask();
- 
-    while ((Button_Mask() & (1u << currentButton)) && ((HAL_GetTick() - start) < 1000))
+    uint32_t t = songTimeMs;
+
+    if (scoreDirty)
     {
-        uint8_t m = Button_Mask();
-        if (m != last)
+        scoreDirty = 0;
+        Draw_Score_Bar();
+    }
+
+    for (int i = 0; i < SONG_LEN; i++)
+    {
+        uint8_t st = noteStatus[i];
+        int16_t wantY = -1;
+
+        if (st != NOTE_HIT)
         {
-            last = m;
-            Draw_Game_Buttons();
+            int32_t y = HIT_Y + ((int32_t)t - (int32_t)noteHitTime[i]) / MS_PER_PX;
+            if (y >= TOP_Y && y <= NOTE_BOTTOM_Y)
+                wantY = (int16_t)y;
         }
-        HAL_Delay(5);
+
+        int16_t oldY = prevY[i];
+        uint8_t x = (uint8_t)(song[i].lane * LANE_W + (LANE_W - NOTE_W) / 2);
+
+        if (oldY >= 0)
+        {
+            if (wantY < 0)
+            {
+                Display_fillRect(x, oldY, NOTE_W, NOTE_H, ST7735_BLACK);   /* hit or off-screen */
+            }
+            else if (wantY > oldY)
+            {
+                int16_t d = wantY - oldY;
+                if (d > NOTE_H) d = NOTE_H;
+                Display_fillRect(x, oldY, NOTE_W, d, ST7735_BLACK);        /* uncovered strip */
+            }
+        }
+
+        if (wantY >= 0 && (wantY != oldY || st != drawnStatus[i]))
+        {
+            Display_fillRect(x, wantY, NOTE_W, NOTE_H,
+                             (st == NOTE_MISSED) ? COLOR_GRAY : laneColors[song[i].lane]);
+        }
+
+        prevY[i] = wantY;
+        drawnStatus[i] = st;
     }
- 
-    Draw_Game_Buttons();
-    HAL_Delay(30);
+
+    Display_fillRect(0, HIT_Y + NOTE_H / 2 - 1, 128, 2, ST7735_WHITE);
+
+    Draw_Keys();
 }
- 
-void Play_Note(uint8_t led)
+
+/* REQUIREMENT 4: win / lose screen, both show the score */
+static void Show_Result(void)
 {
-    if (led < 4)
-    {
-        buzzerSetNote(&buzzer1, chromaticScale[noteNumbers[led]], noteOctave);
-        buzzerEnable(&buzzer1);
-    }
-}
- 
-void Generate_Sequence(void)
-{
-    if (HAL_RNG_GenerateRandomNumber(&hrng, &randomNumber) == HAL_OK)
-        sequence[level - 1] = randomNumber % 4;
-    else
-        sequence[level - 1] = 0;
-}
- 
-void Add_History(uint8_t button)
-{
-    if (historyIndex < MAX_SEQUENCE)
-    {
-        playerHistory[historyIndex] = button;
-        historyIndex++;
-    }
-}
- 
-void Show_Welcome(void)
-{
-    LEDs_AllOff();
-    buzzerDisable(&buzzer1);
- 
+    uint8_t h = hits;
+    uint8_t m = misses;
+    uint8_t pct = (uint8_t)(((uint32_t)h * 100u) / SONG_LEN);
+    uint8_t win = (pct >= WIN_PERCENT);
+
     Display_fillScreen(ST7735_BLACK);
- 
-    Display_setTextColor(ST7735_WHITE);
+
+    Display_setTextColor(win ? ST7735_GREEN : ST7735_RED);
     Display_setTextSize(2, 2);
-    Display_setCursor(34, 30);
-    Display_print("SIMON");
- 
-    Display_setTextSize(1, 1);
-    Display_setCursor(30, 70);
-    Display_print("Memory Game");
- 
-    Display_setCursor(30, 110);
-    Display_print("Press SELECT");
-    Display_setCursor(40, 122);
-    Display_print("to start");
-}
- 
-void Show_Countdown(void)
-{
-    for (int i = 3; i > 0; i--)
-    {
-        Display_fillScreen(ST7735_BLACK);
-        Display_setTextColor(ST7735_WHITE);
-        Display_setTextSize(3, 3);
-        Display_setCursor(52, 60);
- 
-        char number[2] = {(char)('0' + i), '\0'};
-        Display_print(number);
- 
-        if (Delay_With_Abort(1000))
-            return;
-    }
- 
-    gameState = GAME_STATE_PLAY_SEQUENCE;
-}
- 
-void Play_Game_Sequence(void)
-{
-    uint32_t onMs = (level < 30) ? (400 - (level * 10)) : 100;
- 
-    historyIndex = 0;
- 
-    for (int i = 0; i < level; i++)
-    {
-        LED_On(sequence[i]);
-        Play_Note(sequence[i]);
- 
-        if (Delay_With_Abort(onMs))
-            return;
- 
-        buzzerDisable(&buzzer1);
-        LEDs_AllOff();
- 
-        if (Delay_With_Abort(250))
-            return;
-    }
- 
-    inputIndex = 0;
-    gameState = GAME_STATE_WAIT_INPUT;
- 
-    Update_Game_Display();
-}
- 
-void Draw_Game_Buttons(void)
-{
-    uint8_t mask = Button_Mask();
- 
-    for (int i = 0; i < 4; i++)
-    {
-        uint8_t pressed = (mask & (1u << i)) ? 1 : 0;
- 
-        Display_fillCircle(btnX[i], btnY[i], 22,
-                           pressed ? simonColors[i] : ST7735_WHITE);
-    }
-}
- 
-void Update_Game_Display(void)
-{
-    Display_fillScreen(ST7735_BLACK);
- 
+    Display_setCursor(16, 20);
+    Display_print(win ? "YOU WIN!" : "YOU LOSE");
+
     Display_setTextColor(ST7735_WHITE);
     Display_setTextSize(1, 1);
- 
-    Display_setCursor(5, 5);
-    Display_print("Level: ");
- 
-    char score[4] = {
-        (char)('0' + level / 10),
-        (char)('0' + level % 10),
-        '\0'
-    };
-    Display_print(score);
- 
-    Draw_Game_Buttons();
- 
-    Display_setCursor(5, 135);
-    Display_print("Last buttons:");
- 
-    uint8_t count = (historyIndex < 5) ? historyIndex : 5;
- 
-    for (int i = 0; i < count; i++)
-    {
-        uint8_t index = historyIndex - count + i;
- 
-        Display_fillCircle(15 + (i * 22), 150, 7,
-                           simonColors[playerHistory[index]]);
-    }
-}
- 
-int Show_Success(void)
-{
-    Display_fillScreen(ST7735_BLACK);
- 
-    Display_setTextColor(ST7735_GREEN);
-    Display_setTextSize(2, 2);
-    Display_setCursor(10, 45);
-    Display_print("Correct!");
- 
-    Display_setTextSize(1, 1);
+
+    Display_setCursor(10, 60);
+    Display_print("Hits:     ");
+    Print_Num(h);
+    Display_print(" / ");
+    Print_Num(SONG_LEN);
+
+    Display_setCursor(10, 75);
+    Display_print("Misses:   ");
+    Print_Num(m);
+
     Display_setCursor(10, 90);
-    Display_print("Simon says,");
-    Display_setCursor(10, 102);
-    Display_print("\"That's correct!\"");
- 
-    return Delay_With_Abort(1000);
+    Display_print("Accuracy: ");
+    Print_Num(pct);
+    Display_print("%");
+
+    Display_setCursor(10, 125);
+    Display_print("Press SELECT");
+    Display_setCursor(10, 137);
+    Display_print("to return to menu");
 }
- 
-void Show_Win(void)
+
+static void Enter_Screen(GameState s)
 {
-    Display_fillScreen(ST7735_BLACK);
- 
-    Display_setTextColor(ST7735_GREEN);
-    Display_setTextSize(2, 2);
-    Display_setCursor(15, 45);
-    Display_print("YOU WIN!");
- 
-    Display_setTextSize(1, 1);
-    Display_setCursor(15, 90);
-    Display_print("All 32 levels done");
- 
-    for (int i = 0; i < 12; i++)
+    switch (s)
     {
-        LED_On(i % 4);
-        Play_Note(i % 4);
-        DWT_delayMs(150);
-        LEDs_AllOff();
-        buzzerDisable(&buzzer1);
+        case GAME_STATE_WELCOME:   Show_Welcome();          break;
+        case GAME_STATE_COUNTDOWN: Show_Countdown_Screen(); break;
+        case GAME_STATE_PLAYING:   Draw_Play_Static();      break;
+        case GAME_STATE_RESULT:    Show_Result();           break;
+        default: break;
     }
- 
-    Reset_Game();
 }
- 
-void Show_Game_Over(void)
-{
-    Display_fillScreen(ST7735_BLACK);
- 
-    Display_setTextColor(ST7735_RED);
-    Display_setTextSize(2, 2);
-    Display_setCursor(10, 45);
-    Display_print("GAME OVER");
- 
-    Display_setTextSize(1, 1);
-    Display_setCursor(20, 90);
-    Display_print("Returning to menu");
- 
-    for (int i = 0; i < 20; i++)
-    {
-        if (SELECT_PRESSED())
-            break;
- 
-        uint32_t randomValue;
- 
-        if (HAL_RNG_GenerateRandomNumber(&hrng, &randomValue) == HAL_OK)
-        {
-            uint8_t led = randomValue % 4;
-            LED_On(led);
-            Play_Note(led);
-        }
- 
-        DWT_delayMs(100);
- 
-        LEDs_AllOff();
-        buzzerDisable(&buzzer1);
-    }
- 
-    while (SELECT_PRESSED())
-        HAL_Delay(10);
- 
-    Reset_Game();
-}
- 
-void Reset_Game(void)
-{
-    LEDs_AllOff();
-    buzzerDisable(&buzzer1);
- 
-    level = 1;
-    inputIndex = 0;
-    historyIndex = 0;
- 
-    gameState = GAME_STATE_WELCOME;
-}
+
 /* USER CODE END 0 */
 
 /**
@@ -541,7 +700,9 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   DWT_Init();
-  Simon_GPIO_Init();
+  Game_GPIO_Init();
+  Song_Init();
+  Game_Timer_Init();                 /* TIM2 now ticking g_ms every 1 ms */
 
   TFTShield18_create(&hi2c1);
 
@@ -551,7 +712,7 @@ int main(void)
   }
 
   TFTShield18_tftReset(true);
-  DWT_delayMs(100);
+  Wait_Ms_Timer(100);                /* one-time start-up wait, measured by TIM2 */
 
   Display_create(&hspi2, DISP_CS_Pin, DISP_CS_GPIO_Port,
                  DISP_DCX_SEL_Pin, DISP_DCX_SEL_GPIO_Port);
@@ -561,147 +722,35 @@ int main(void)
 
   TFTShield18_setBacklight(TFTSHIELD_BACKLIGHT_ON);
 
-  Show_Welcome();
+  int drawnState = -1;               /* force first screen to draw */
 
   while (1)
   {
-      switch (gameState)
+      /* SELECT: starts the game from the welcome screen, and from ANY other
+         state returns to the welcome screen (REQUIREMENT 2a / 2b / 4b) */
+      if (Select_Event())
       {
-          case GAME_STATE_WELCOME:
-          {
-              if (SELECT_PRESSED())
-              {
-                  while (SELECT_PRESSED())
-                      HAL_Delay(10);
-                  HAL_Delay(30);
- 
-                  level = 1;
-                  inputIndex = 0;
-                  historyIndex = 0;
- 
-                  Generate_Sequence();
- 
-                  gameState = GAME_STATE_COUNTDOWN;
-              }
-              break;
-          }
- 
-          case GAME_STATE_COUNTDOWN:
-          {
-              Show_Countdown();
-              break;
-          }
- 
-          case GAME_STATE_PLAY_SEQUENCE:
-          {
-              Play_Game_Sequence();
-              break;
-          }
- 
-          case GAME_STATE_WAIT_INPUT:
-          {
-              int8_t button = -1;
-              int aborted = 0;
-              uint32_t startTime = HAL_GetTick();
-              uint8_t lastMask = Button_Mask();
- 
-              while (((HAL_GetTick() - startTime) < INPUT_TIMEOUT_MS) && (button == -1))
-              {
-                  if (Check_Select_Abort())
-                  {
-                      aborted = 1;
-                      break;
-                  }
- 
-                  uint8_t m = Button_Mask();
-                  if (m != lastMask)
-                  {
-                      lastMask = m;
-                      Draw_Game_Buttons();
-                  }
- 
-                  button = Read_Button();
-              }
- 
-              if (aborted)
-                  break;
- 
-              if (button != -1)
-              {
-                  currentButton = button;
-                  LED_On(currentButton);
-                  Play_Note(currentButton);
-                  Add_History(currentButton);
-                  Update_Game_Display();
-                  gameState = GAME_STATE_CHECK_INPUT;
-              }
-              else
-              {
-                  gameState = GAME_STATE_GAME_OVER;
-              }
-              break;
-          }
- 
-          case GAME_STATE_CHECK_INPUT:
-          {
-              if (currentButton == sequence[inputIndex])
-              {
-                  inputIndex++;
- 
-                  Wait_Button_Release();
- 
-                  LEDs_AllOff();
-                  buzzerDisable(&buzzer1);
- 
-                  if (inputIndex >= level)
-                      gameState = GAME_STATE_SUCCESS;
-                  else
-                      gameState = GAME_STATE_WAIT_INPUT;
-              }
-              else
-              {
-                  gameState = GAME_STATE_GAME_OVER;
-              }
-              break;
-          }
- 
-          case GAME_STATE_SUCCESS:
-          {
-              if (Show_Success())
-                  break;
- 
-              if (level >= WIN_LEVEL)
-              {
-                  gameState = GAME_STATE_WIN;
-                  break;
-              }
- 
-              level++;
-              Generate_Sequence();
-              gameState = GAME_STATE_PLAY_SEQUENCE;
-              break;
-          }
- 
-          case GAME_STATE_WIN:
-          {
-              Show_Win();
-              Show_Welcome();
-              break;
-          }
- 
-          case GAME_STATE_GAME_OVER:
-          {
-              Show_Game_Over();
-              Show_Welcome();
-              break;
-          }
- 
-          default:
-          {
+          if (gameState == GAME_STATE_WELCOME)
+              Start_Game();
+          else
               Reset_Game();
-              Show_Welcome();
-              break;
-          }
+      }
+
+      GameState s = gameState;
+
+      if ((int)s != drawnState)
+      {
+          drawnState = (int)s;
+          Enter_Screen(s);
+      }
+      else if (s == GAME_STATE_COUNTDOWN)
+      {
+          Update_Countdown();
+      }
+      else if (s == GAME_STATE_PLAYING && frameFlag)
+      {
+          frameFlag = 0;
+          Draw_Play_Frame();
       }
   }
   /* USER CODE END 2 */
@@ -1069,7 +1118,14 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+void TIM2_IRQHandler(void)
+{
+    if (TIM2->SR & TIM_SR_UIF)
+    {
+        TIM2->SR = ~TIM_SR_UIF;    /* clear the flag, or the ISR re-fires forever */
+        Game_Tick();
+    }
+}
 /* USER CODE END 4 */
 
  /* MPU Configuration */
